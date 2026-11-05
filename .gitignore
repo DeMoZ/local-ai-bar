@@ -1,0 +1,11 @@
+.build/
+build/
+.swiftpm/
+*.xcodeproj/
+xcuserdata/
+.DS_Store
+# never commit service configs or secrets
+config.json
+*.env
+.env*
+*.token
