@@ -14,6 +14,8 @@ behind a small control service with `/status`, `/start`, `/stop` endpoints and a
 - **Speed test**: a short generation that shows tokens per second.
 - **Copy API endpoint** (OpenAI-compatible `http://<host>:<port>/v1`) and **open the chat web UI**.
 - **Launch at login**.
+- **Updates** through Sparkle (checks by itself; **Обновления** checks now).
+- **♥ Поддержать**: ways to support the project, from the public [`DeMoZ/donations`](https://github.com/DeMoZ/donations) repository (links are never hardcoded).
 - The token is kept in the **macOS Keychain**, never in files or UserDefaults.
   It can be typed in or imported from the control service's `config.json`
   (`token`, `controlPort`, `llamaPort` are read from it).
@@ -31,6 +33,15 @@ On first network access macOS asks for **Local Network** permission; allow it
 (System Settings → Privacy & Security → Local Network).
 
 The app is ad-hoc signed, so after a rebuild macOS may ask once more for Keychain access to the token.
+
+## Release
+
+1. Bump `CFBundleShortVersionString` and `CFBundleVersion` in `Resources/Info.plist`, add `docs/releases/v<version>.md`.
+2. Merge to `main`, then on a clean, up-to-date `main` run `./scripts/release.sh`.
+
+It builds the app, zips it, signs the zip with the Sparkle EdDSA key (Keychain account `LocalAIBar`, or
+`$SPARKLE_PRIVATE_KEY`), writes `appcast.xml` and publishes both as a GitHub release. The app reads
+`releases/latest/download/appcast.xml`.
 
 ## Server API used
 

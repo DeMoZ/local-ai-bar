@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ServiceManagement
+import Sparkle
 
 @MainActor
 final class AppState: ObservableObject {
@@ -33,6 +34,16 @@ final class AppState: ObservableObject {
     @Published var testingSpeed = false
 
     @Published var launchAtLogin = SMAppService.mainApp.status == .enabled
+
+    // Donations (links from the public DeMoZ/donations repo, cached)
+    @Published var donations: DonationInfo? = Donations.cached()
+    @Published var loadingDonations = false
+
+    /// Sparkle updater; only inside a real .app bundle (not when run from `swift run`).
+    let updater: SPUStandardUpdaterController? = Bundle.main.bundleURL.pathExtension == "app"
+        ? SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil) : nil
+
+    var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev" }
 
     private var timer: Timer?
     private var lastInfoFetch = Date.distantPast
@@ -179,6 +190,20 @@ final class AppState: ObservableObject {
 
     func openWebUI() {
         if let u = URL(string: "http://\(host):\(llamaPort)/") { NSWorkspace.shared.open(u) }
+    }
+
+    func checkForUpdates() {
+        guard let updater else { message = "Обновления работают только в собранном приложении"; return }
+        NSApp.activate(ignoringOtherApps: true)  // menu-bar app: bring Sparkle's window to the front
+        updater.checkForUpdates(nil)
+    }
+
+    func loadDonations() {
+        loadingDonations = true
+        Task {
+            if let fresh = await Donations.download() { donations = fresh }
+            loadingDonations = false
+        }
     }
 
     func setLaunchAtLogin(_ on: Bool) {
