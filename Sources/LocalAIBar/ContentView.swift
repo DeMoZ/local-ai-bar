@@ -24,8 +24,12 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(width: 340)
+        .fixedSize(horizontal: false, vertical: true)
         // Solid background: the default translucent menu-bar window lets windows behind show through.
         .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+        // The menu-bar window grows with its content but does not shrink back (e.g. after closing settings),
+        // leaving a stale transparent strip. Make it opaque and fit it to the content, keeping the top edge.
+        .background(PopoverWindowFitter())
     }
 
     private var header: some View {
@@ -255,6 +259,44 @@ struct DonateView: View {
                 Text("Не удалось загрузить способы поддержки. Проверьте интернет и откройте ещё раз.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+/// Keeps the MenuBarExtra window opaque and exactly as tall as its SwiftUI content.
+private struct PopoverWindowFitter: NSViewRepresentable {
+    func makeNSView(context: Context) -> FitterView { FitterView() }
+    func updateNSView(_ view: FitterView, context: Context) { view.scheduleFit() }
+
+    final class FitterView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let w = window else { return }
+            w.isOpaque = true
+            w.backgroundColor = .windowBackgroundColor
+            scheduleFit()
+        }
+
+        // Our size follows the content (we're its background), so a layout pass means the content changed.
+        override func layout() {
+            super.layout()
+            scheduleFit()
+        }
+
+        func scheduleFit() {
+            DispatchQueue.main.async { [weak self] in self?.fit() }
+        }
+
+        private func fit() {
+            guard let w = window, let content = w.contentView else { return }
+            let target = bounds.height
+            guard target > 0, abs(content.frame.height - target) > 0.5 else { return }
+            var f = w.frame
+            let top = f.maxY
+            f.size.height = w.frameRect(forContentRect: NSRect(origin: .zero, size: NSSize(width: f.width, height: target))).height
+            f.origin.y = top - f.size.height  // keep the top edge under the menu bar
+            w.setFrame(f, display: true)
+            w.invalidateShadow()
         }
     }
 }
