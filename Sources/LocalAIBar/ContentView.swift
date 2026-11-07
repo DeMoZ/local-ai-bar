@@ -3,12 +3,15 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var s: AppState
     @State private var showSettings = false
+    @State private var showDonate = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
             Divider()
-            if showSettings || !s.configured {
+            if showDonate {
+                DonateView(close: { showDonate = false })
+            } else if showSettings || !s.configured {
                 SettingsView()
             } else {
                 StatusView()
@@ -21,6 +24,8 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(width: 340)
+        // Solid background: the default translucent menu-bar window lets windows behind show through.
+        .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
     }
 
     private var header: some View {
@@ -41,13 +46,23 @@ struct ContentView: View {
     }
 
     private var footer: some View {
-        HStack {
+        VStack(alignment: .leading, spacing: 6) {
             if let t = s.lastUpdate, s.connected {
                 Text("Обновлено \(t.formatted(date: .omitted, time: .standard))")
                     .font(.caption2).foregroundStyle(.tertiary)
             }
-            Spacer()
-            Button("Выход") { NSApp.terminate(nil) }.buttonStyle(.borderless).font(.caption)
+            HStack(spacing: 12) {
+                Button { showDonate.toggle(); if showDonate { s.loadDonations() } } label: {
+                    Label("Поддержать", systemImage: "heart.fill")
+                }
+                .foregroundStyle(.pink)
+                Button("Обновления") { s.checkForUpdates() }.help("Проверить обновления")
+                Spacer()
+                Text("v\(s.appVersion)").foregroundStyle(.tertiary)
+                Button("Выход") { NSApp.terminate(nil) }
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
         }
     }
 }
@@ -201,6 +216,45 @@ struct SettingsView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!s.configured)
                 .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+}
+
+struct DonateView: View {
+    @EnvironmentObject var s: AppState
+    var close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Поддержать LocalAIBar").font(.subheadline.weight(.semibold))
+                Spacer()
+                if s.loadingDonations { ProgressView().controlSize(.small) }
+                Button { close() } label: { Image(systemName: "xmark.circle") }.buttonStyle(.borderless)
+            }
+            if let info = s.donations {
+                if let m = info.message?.resolved(for: Donations.languages) {
+                    Text(m).font(.callout).fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(info.methods) { method in
+                    Button { NSWorkspace.shared.open(method.url) } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(method.title.resolved(for: Donations.languages) ?? method.id).font(.callout.weight(.semibold))
+                            if let d = method.description?.resolved(for: Donations.languages) {
+                                Text(d).font(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.pink.opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else if !s.loadingDonations {
+                Text("Не удалось загрузить способы поддержки. Проверьте интернет и откройте ещё раз.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 }
