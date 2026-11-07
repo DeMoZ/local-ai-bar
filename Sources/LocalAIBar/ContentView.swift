@@ -21,6 +21,8 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(width: 340)
+        // Solid background: the default translucent menu-bar window lets windows behind show through.
+        .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
     }
 
     private var header: some View {
