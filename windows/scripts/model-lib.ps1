@@ -56,14 +56,26 @@ function Start-Model {
     $p = Start-Process -FilePath $c.llamaServerPath -ArgumentList $llamaArgs -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput "$script:LogDir\llama.out.log" -RedirectStandardError "$script:LogDir\llama.err.log"
     Set-Content $script:PidFile $p.Id
+    # A bad flag or a busy port makes llama-server exit at once; report it instead of claiming success.
+    Start-Sleep -Seconds 2
+    if ($p.HasExited) {
+        Remove-Item $script:PidFile -ErrorAction SilentlyContinue
+        throw "llama-server exited at start (code $($p.ExitCode)), see $script:LogDir\llama.err.log"
+    }
 }
 
+# Stops the llama-server from llama.pid and any stray llama-server.exe (e.g. one started from another window),
+# and fails loudly if one cannot be stopped (another user or an elevated window) instead of starting a second one.
 function Stop-Model {
-    $p = Get-LlamaProcess
-    if ($p) {
-        Stop-Process -Id $p.Id -Force
+    $procs = @(Get-LlamaProcess) + @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue) |
+        Where-Object { $_ } | Sort-Object Id -Unique
+    foreach ($p in $procs) {
+        try { Stop-Process -Id $p.Id -Force -ErrorAction Stop }
+        catch { throw "cannot stop llama-server (PID $($p.Id)): $($_.Exception.Message). Was it started from an Administrator window? Stop it there or reboot." }
+    }
+    foreach ($p in $procs) {
         # Wait until it is gone so the port and GPU memory are free before a restart.
-        $p.WaitForExit(15000) | Out-Null
+        if (-not $p.WaitForExit(15000)) { throw "llama-server (PID $($p.Id)) did not exit in 15 s" }
     }
     Remove-Item $script:PidFile -ErrorAction SilentlyContinue
 }

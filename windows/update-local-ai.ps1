@@ -2,10 +2,9 @@
 $ErrorActionPreference = 'Stop'
 $dir = 'D:\Ai\scripts'
 $pidFile = 'D:\Ai\llama.pid'
-$wasRunning = $false
-if (Test-Path $pidFile) {
-    $p = Get-Process -Id ([int](Get-Content $pidFile -Raw)) -ErrorAction SilentlyContinue
-    $wasRunning = [bool]($p -and $p.ProcessName -like 'llama-server*')
+$wasRunning = [bool](Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)
+if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host 'Note: this window runs as Administrator; that is fine, the model is started by the service.'
 }
 foreach ($f in 'model-lib.ps1', 'control-server.ps1') { Copy-Item "$dir\$f" "$dir\$f.bak" -Force }
 Stop-ScheduledTask -TaskName 'LocalAI-Control' -ErrorAction SilentlyContinue
@@ -70,14 +69,26 @@ function Start-Model {
     $p = Start-Process -FilePath $c.llamaServerPath -ArgumentList $llamaArgs -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput "$script:LogDir\llama.out.log" -RedirectStandardError "$script:LogDir\llama.err.log"
     Set-Content $script:PidFile $p.Id
+    # A bad flag or a busy port makes llama-server exit at once; report it instead of claiming success.
+    Start-Sleep -Seconds 2
+    if ($p.HasExited) {
+        Remove-Item $script:PidFile -ErrorAction SilentlyContinue
+        throw "llama-server exited at start (code $($p.ExitCode)), see $script:LogDir\llama.err.log"
+    }
 }
 
+# Stops the llama-server from llama.pid and any stray llama-server.exe (e.g. one started from another window),
+# and fails loudly if one cannot be stopped (another user or an elevated window) instead of starting a second one.
 function Stop-Model {
-    $p = Get-LlamaProcess
-    if ($p) {
-        Stop-Process -Id $p.Id -Force
+    $procs = @(Get-LlamaProcess) + @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue) |
+        Where-Object { $_ } | Sort-Object Id -Unique
+    foreach ($p in $procs) {
+        try { Stop-Process -Id $p.Id -Force -ErrorAction Stop }
+        catch { throw "cannot stop llama-server (PID $($p.Id)): $($_.Exception.Message). Was it started from an Administrator window? Stop it there or reboot." }
+    }
+    foreach ($p in $procs) {
         # Wait until it is gone so the port and GPU memory are free before a restart.
-        $p.WaitForExit(15000) | Out-Null
+        if (-not $p.WaitForExit(15000)) { throw "llama-server (PID $($p.Id)) did not exit in 15 s" }
     }
     Remove-Item $script:PidFile -ErrorAction SilentlyContinue
 }
@@ -185,10 +196,14 @@ while ($listener.IsListening) {
 '@
 
 . "$dir\model-lib.ps1"
-if ($wasRunning) { Stop-Model; Start-Model; Write-Host 'Model restarted with the new flags.' }
+# Stop every llama-server here; the model is started again by the service itself (its own user and rights),
+# never from this window, so the service can always stop it later.
+try { Stop-Model } catch { Write-Warning "$_ Run this script from an Administrator PowerShell window, or reboot the PC." }
 Start-ScheduledTask -TaskName 'LocalAI-Control'
 Start-Sleep -Seconds 3
 $h = @{ Authorization = "Bearer $($script:Cfg.token)" }
-$r = Invoke-RestMethod "http://127.0.0.1:$($script:Cfg.controlPort)/config" -Headers $h
+$base = "http://127.0.0.1:$($script:Cfg.controlPort)"
+if ($wasRunning) { Invoke-RestMethod "$base/start" -Method Post -Headers $h | Out-Null; Write-Host 'Model started by the service.' }
+$r = Invoke-RestMethod "$base/config" -Headers $h
 Write-Host "OK: control service updated. ctx=$($r.ctx) ngl=$($r.ngl) parallel=$($r.parallel) ubatch=$($r.ubatch)"
 Write-Host "Backups: $dir\model-lib.ps1.bak, $dir\control-server.ps1.bak"
