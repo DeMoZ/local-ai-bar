@@ -213,6 +213,8 @@ struct SettingsView: View {
             }
             Text("Хранится в Связке ключей macOS").font(.caption2).foregroundStyle(.tertiary)
 
+            if s.connected { contextSection }
+
             Toggle("Запускать при входе", isOn: Binding(get: { s.launchAtLogin }, set: { s.setLaunchAtLogin($0) }))
                 .font(.caption)
 
@@ -220,6 +222,36 @@ struct SettingsView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!s.configured)
                 .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .onAppear { s.loadServiceConfig() }
+    }
+
+    private var contextSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Контекст").font(.subheadline.weight(.semibold))
+            HStack {
+                Picker("", selection: $s.ctxChoice) {
+                    ForEach(AppState.ctxChoices, id: \.self) { Text("\($0 / 1024)k").tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(s.serviceCtx == nil || s.applyingCtx)
+                Button {
+                    s.applyContext()
+                } label: {
+                    if s.applyingCtx { ProgressView().controlSize(.small) } else { Text("Применить") }
+                }
+                .disabled(s.serviceCtx == nil || s.applyingCtx || s.ctxChoice == s.serviceCtx)
+            }
+            if let m = s.ctxMessage {
+                Text(m).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if let cur = s.serviceCtx {
+                let train = s.model?.ctxTrain ?? 0
+                Text(train > 0 && s.ctxChoice > train
+                     ? "Больше, чем модель обучена (\(train.formatted(.number))): качество может упасть"
+                     : "Сейчас \(cur.formatted(.number)). Применение перезапустит модель.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
         }
     }
 }

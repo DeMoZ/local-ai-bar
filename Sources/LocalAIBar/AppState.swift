@@ -33,6 +33,13 @@ final class AppState: ObservableObject {
     @Published var speed: SpeedResult?
     @Published var testingSpeed = false
 
+    // Context size (service config)
+    static let ctxChoices = [16384, 32768, 65536]
+    @Published var serviceCtx: Int?
+    @Published var ctxChoice = 32768
+    @Published var applyingCtx = false
+    @Published var ctxMessage: String?
+
     @Published var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     // Donations (links from the public DeMoZ/donations repo, cached)
@@ -75,6 +82,7 @@ final class AppState: ObservableObject {
         timer?.invalidate(); timer = nil
         status = .unknown; model = nil; slots = nil; llamaHealthy = false; latencyMs = 0
         runningSince = nil; speed = nil
+        serviceCtx = nil; ctxMessage = nil
     }
 
     private func startPolling() {
@@ -134,6 +142,45 @@ final class AppState: ObservableObject {
         Task {
             do { speed = try await client.speedTest() } catch { message = "Тест: \(error.localizedDescription)" }
             testingSpeed = false
+        }
+    }
+
+    // MARK: context size
+
+    func loadServiceConfig() {
+        guard connected, configured else { return }
+        Task {
+            do {
+                let cfg = try await client.config()
+                serviceCtx = cfg.ctx
+                ctxChoice = cfg.ctx
+                ctxMessage = nil
+            } catch {
+                serviceCtx = nil
+                ctxMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func applyContext() {
+        let ctx = ctxChoice
+        applyingCtx = true
+        ctxMessage = nil
+        Task {
+            do {
+                let st = try await client.setConfig(ctx: ctx)
+                status = st
+                serviceCtx = ctx
+                model = nil; speed = nil
+                lastInfoFetch = .distantPast
+                ctxMessage = st == .stopped
+                    ? "Контекст \(ctx.formatted(.number)) сохранён, применится при включении модели"
+                    : "Контекст \(ctx.formatted(.number)) сохранён, модель перезапускается"
+            } catch {
+                ctxMessage = error.localizedDescription
+            }
+            applyingCtx = false
+            await refresh()
         }
     }
 

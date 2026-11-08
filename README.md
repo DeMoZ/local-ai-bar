@@ -1,7 +1,8 @@
 # LocalAIBar
 
 A macOS menu bar app for a local LLM (llama.cpp `llama-server`) running on another PC in your LAN,
-behind a small control service with `/status`, `/start`, `/stop` endpoints and a Bearer token.
+behind a small control service with `/status`, `/start`, `/stop`, `/config` endpoints and a Bearer token
+(PowerShell scripts for the PC are in [`windows/`](windows)).
 
 ## Features
 
@@ -11,6 +12,7 @@ behind a small control service with `/status`, `/start`, `/stop` endpoints and a
 - **Connect / disconnect** (start / stop monitoring) and **turn the model on / off**.
 - **Model info** from llama-server: file, quantization, parameters, size, context (current / max),
   input types, slots in use, server health, uptime, ping.
+- **Context size** (16k / 32k / 64k): saved on the PC, the model restarts with it.
 - **Speed test**: a short generation that shows tokens per second.
 - **Copy API endpoint** (OpenAI-compatible `http://<host>:<port>/v1`) and **open the chat web UI**.
 - **Launch at login**.
@@ -48,4 +50,12 @@ It builds the app, zips it, signs the zip with the Sparkle EdDSA key (Keychain a
 | Service | Endpoint | Auth |
 |---|---|---|
 | control | `GET /status`, `POST /start`, `POST /stop` → `{"status": "running" \| "loading" \| "stopped"}` | Bearer |
+| control | `GET /config` → `{"ctx", "ngl", "parallel", "ubatch", "model"}` (no token); `POST /config {"ctx": N}` → `{"status", "ctx", "restarted"}` | Bearer |
 | llama-server | `GET /health`, `GET /v1/models`, `GET /props`, `GET /slots`, `POST /completion` | Bearer (same token) |
+
+## PC control service (Windows)
+
+`windows/scripts/` holds `model-lib.ps1` and `control-server.ps1` (run by the scheduled task `LocalAI-Control`,
+settings in `D:\Ai\config.json`). To update a PC that already has the service: copy the text of
+`windows/update-local-ai.ps1` to the clipboard, then in PowerShell on the PC save it as a file and run it. It backs up
+both scripts as `.bak`, writes the new ones, restarts the task (and the model, if it was on) and checks `/config`.

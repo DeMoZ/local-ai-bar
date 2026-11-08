@@ -24,6 +24,12 @@ struct SlotsInfo {
     var busy = 0
 }
 
+/// Model launch settings from the control service (`GET /config`); the token is never returned.
+struct ServiceConfig {
+    var ctx: Int
+    var ngl: Int?
+}
+
 struct SpeedResult {
     var promptTPS: Double
     var genTPS: Double
@@ -33,10 +39,13 @@ struct SpeedResult {
 enum APIError: LocalizedError {
     case http(Int, String)
     case badResponse
+    case noConfigEndpoint
     var errorDescription: String? {
         switch self {
         case .http(let code, let msg): return "HTTP \(code)\(msg.isEmpty ? "" : ": \(msg)")"
         case .badResponse: return "Непонятный ответ сервера"
+        case .noConfigEndpoint:
+            return "Сервис управления на ПК старой версии и не умеет менять контекст. Обновите control-server.ps1 на ПК."
         }
     }
 }
@@ -99,6 +108,24 @@ struct AIClient {
 
     private func control(_ path: String) async throws -> ModelStatus {
         let (code, data) = try await request(controlBase + path, method: "POST", timeout: 30)
+        guard code == 200 else { throw APIError.http(code, json(data)["error"] as? String ?? "") }
+        return ModelStatus(rawValue: json(data)["status"] as? String ?? "") ?? .unknown
+    }
+
+    /// Current launch settings. Throws `.noConfigEndpoint` when the service predates `/config`.
+    func config() async throws -> ServiceConfig {
+        let (code, data) = try await request(controlBase + "/config")
+        if code == 404 { throw APIError.noConfigEndpoint }
+        guard code == 200 else { throw APIError.http(code, json(data)["error"] as? String ?? "") }
+        let j = json(data)
+        guard let ctx = (j["ctx"] as? NSNumber)?.intValue else { throw APIError.badResponse }
+        return ServiceConfig(ctx: ctx, ngl: (j["ngl"] as? NSNumber)?.intValue)
+    }
+
+    /// Saves a new context size; the service writes config.json and restarts llama-server.
+    func setConfig(ctx: Int) async throws -> ModelStatus {
+        let (code, data) = try await request(controlBase + "/config", method: "POST", body: ["ctx": ctx], timeout: 60)
+        if code == 404 { throw APIError.noConfigEndpoint }
         guard code == 200 else { throw APIError.http(code, json(data)["error"] as? String ?? "") }
         return ModelStatus(rawValue: json(data)["status"] as? String ?? "") ?? .unknown
     }
