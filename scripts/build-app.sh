@@ -7,7 +7,15 @@ APP=build/LocalAIBar.app
 swift build -c release
 BIN="$(swift build -c release --show-bin-path)"
 
-sign() { codesign --force --sign - --timestamp=none "$@"; }  # ad-hoc; updates are verified by Sparkle's EdDSA key
+# Ad-hoc by default (updates are verified by Sparkle's EdDSA key). With DEVELOPER_ID set to a
+# "Developer ID Application: Name (TEAMID)" identity from the login keychain: hardened runtime and a secure
+# timestamp, as notarization requires (scripts/release.sh notarizes when NOTARY_PROFILE is set too).
+if [[ -n "${DEVELOPER_ID:-}" ]]; then
+  security find-identity -v -p codesigning | grep -qF "$DEVELOPER_ID" || { echo "No signing identity: $DEVELOPER_ID"; exit 1; }
+  sign() { codesign --force --sign "$DEVELOPER_ID" --options runtime --timestamp "$@"; }
+else
+  sign() { codesign --force --sign - --timestamp=none "$@"; }
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"

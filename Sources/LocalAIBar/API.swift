@@ -22,12 +22,51 @@ struct ModelInfo {
 struct SlotsInfo {
     var total = 0
     var busy = 0
+    /// Tokens generated so far by the requests in progress (for the live tokens-per-second rate).
+    var decoded = 0
 }
 
 /// Model launch settings from the control service (`GET /config`); the token is never returned.
 struct ServiceConfig {
     var ctx: Int
     var ngl: Int?
+    var modelId: String?
+    var autoRestart: Bool?
+}
+
+/// An unexpected llama-server exit seen by the control service.
+struct CrashInfo: Equatable {
+    var at: String
+    var exitCode: Int?
+    var restarted: Bool
+}
+
+/// `GET /status`. `crash` / `autoRestart` are nil with a control service older than v0.4.
+struct StatusReply {
+    var status: ModelStatus
+    var latency: TimeInterval
+    var crash: CrashInfo?
+    var autoRestart: Bool?
+}
+
+/// A model file on the PC (`GET /models`); `id` is its path inside the models folder.
+struct ModelEntry: Identifiable, Hashable {
+    var id: String
+    var name: String
+    var sizeBytes: Int64
+    var vision: Bool
+    var current: Bool
+}
+
+/// PC load (`GET /metrics`); nil fields are not reported by the PC.
+struct PcMetrics {
+    var cpu: Double?
+    var gpu: Double?
+    var ramTotal: Int64?
+    var ramUsed: Int64?
+    var gpuDedicated: Int64?
+    var gpuShared: Int64?
+    var llamaRam: Int64?
 }
 
 struct SpeedResult {
@@ -40,12 +79,15 @@ enum APIError: LocalizedError {
     case http(Int, String)
     case badResponse
     case noConfigEndpoint
+    case oldService
     var errorDescription: String? {
         switch self {
         case .http(let code, let msg): return "HTTP \(code)\(msg.isEmpty ? "" : ": \(msg)")"
         case .badResponse: return "Непонятный ответ сервера"
         case .noConfigEndpoint:
-            return "Сервис управления на ПК старой версии и не умеет менять контекст. Обновите control-server.ps1 на ПК."
+            return "Сервис управления на ПК старой версии и не умеет менять контекст. Обновите его: server/update-windows.ps1 в репозитории."
+        case .oldService:
+            return "Сервис управления на ПК старой версии. Обновите его: server/update-windows.ps1 в репозитории."
         }
     }
 }
@@ -89,17 +131,23 @@ struct AIClient {
 
     // MARK: control service
 
-    func status() async -> (ModelStatus, TimeInterval) {
+    func status() async -> StatusReply {
         let t0 = Date()
         do {
             let (code, data) = try await request(controlBase + "/status")
             let ms = Date().timeIntervalSince(t0)
-            if code == 401 || code == 403 { return (.unauthorized, ms) }
-            guard code == 200 else { return (.unknown, ms) }
-            let s = json(data)["status"] as? String ?? ""
-            return (ModelStatus(rawValue: s) ?? .unknown, ms)
+            if code == 401 || code == 403 { return StatusReply(status: .unauthorized, latency: ms) }
+            guard code == 200 else { return StatusReply(status: .unknown, latency: ms) }
+            let j = json(data)
+            var crash: CrashInfo?
+            if let c = j["crash"] as? [String: Any], let at = c["at"] as? String {
+                crash = CrashInfo(at: at, exitCode: (c["exitCode"] as? NSNumber)?.intValue,
+                                  restarted: c["restarted"] as? Bool ?? false)
+            }
+            return StatusReply(status: ModelStatus(rawValue: j["status"] as? String ?? "") ?? .unknown,
+                               latency: ms, crash: crash, autoRestart: j["autoRestart"] as? Bool)
         } catch {
-            return (.unreachable, 0)
+            return StatusReply(status: .unreachable, latency: 0)
         }
     }
 
@@ -119,15 +167,40 @@ struct AIClient {
         guard code == 200 else { throw APIError.http(code, json(data)["error"] as? String ?? "") }
         let j = json(data)
         guard let ctx = (j["ctx"] as? NSNumber)?.intValue else { throw APIError.badResponse }
-        return ServiceConfig(ctx: ctx, ngl: (j["ngl"] as? NSNumber)?.intValue)
+        return ServiceConfig(ctx: ctx, ngl: (j["ngl"] as? NSNumber)?.intValue,
+                             modelId: j["modelId"] as? String, autoRestart: j["autoRestart"] as? Bool)
     }
 
-    /// Saves a new context size; the service writes config.json and restarts llama-server.
-    func setConfig(ctx: Int) async throws -> ModelStatus {
-        let (code, data) = try await request(controlBase + "/config", method: "POST", body: ["ctx": ctx], timeout: 60)
+    /// Saves launch settings (`ctx`, `model`, `autoRestart`, any subset); the service writes config.json and
+    /// restarts llama-server if the model or context changed while it was on.
+    func setConfig(_ body: [String: Any]) async throws -> ModelStatus {
+        let (code, data) = try await request(controlBase + "/config", method: "POST", body: body, timeout: 90)
         if code == 404 { throw APIError.noConfigEndpoint }
         guard code == 200 else { throw APIError.http(code, json(data)["error"] as? String ?? "") }
         return ModelStatus(rawValue: json(data)["status"] as? String ?? "") ?? .unknown
+    }
+
+    /// Models in the PC's models folder. Throws `.oldService` when the service predates `/models`.
+    func models() async throws -> [ModelEntry] {
+        let (code, data) = try await request(controlBase + "/models", timeout: 10)
+        if code == 404 { throw APIError.oldService }
+        guard code == 200 else { throw APIError.http(code, json(data)["error"] as? String ?? "") }
+        return (json(data)["models"] as? [[String: Any]] ?? []).compactMap { m in
+            guard let id = m["id"] as? String else { return nil }
+            return ModelEntry(id: id, name: m["name"] as? String ?? id,
+                              sizeBytes: (m["sizeBytes"] as? NSNumber)?.int64Value ?? 0,
+                              vision: m["vision"] as? Bool ?? false, current: m["current"] as? Bool ?? false)
+        }
+    }
+
+    /// PC load, or nil when the service predates `/metrics` or does not answer.
+    func metrics() async -> PcMetrics? {
+        guard let (code, data) = try? await request(controlBase + "/metrics", timeout: 8), code == 200 else { return nil }
+        let j = json(data)
+        let d = { (k: String) in (j[k] as? NSNumber)?.doubleValue }
+        let i = { (k: String) in (j[k] as? NSNumber)?.int64Value }
+        return PcMetrics(cpu: d("cpu"), gpu: d("gpu"), ramTotal: i("ramTotal"), ramUsed: i("ramUsed"),
+                         gpuDedicated: i("gpuDedicated"), gpuShared: i("gpuShared"), llamaRam: i("llamaRam"))
     }
 
     // MARK: llama-server
@@ -166,7 +239,14 @@ struct AIClient {
     func slots() async -> SlotsInfo? {
         guard let (code, data) = try? await request(llamaBase + "/slots"), code == 200,
               let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return nil }
-        return SlotsInfo(total: arr.count, busy: arr.filter { $0["is_processing"] as? Bool == true }.count)
+        let busy = arr.filter { $0["is_processing"] as? Bool == true }
+        // next_token is an object in older llama.cpp builds and an array (one per sequence) in newer ones.
+        let decoded = busy.reduce(0) { sum, slot in
+            let next = slot["next_token"]
+            let items = (next as? [[String: Any]]) ?? ((next as? [String: Any]).map { [$0] } ?? [])
+            return sum + items.reduce(0) { $0 + ((($1["n_decoded"]) as? NSNumber)?.intValue ?? 0) }
+        }
+        return SlotsInfo(total: arr.count, busy: busy.count, decoded: decoded)
     }
 
     /// Short generation to measure prompt and generation speed (tokens per second).
