@@ -8,7 +8,15 @@ struct LocalAIBarApp: App {
         MenuBarExtra {
             ContentView().environmentObject(state)
         } label: {
-            Image(systemName: state.menuIcon)
+            // While a request is in progress the icon shows its live speed ("…" while the prompt is read).
+            if let t = state.liveTPS, state.connected {
+                HStack(spacing: 3) {
+                    Image(systemName: state.menuIcon)
+                    Text(t >= 0.5 ? "\(Int(t.rounded())) т/с" : "…").monospacedDigit()
+                }
+            } else {
+                Image(systemName: state.menuIcon)
+            }
         }
         .menuBarExtraStyle(.window)
     }

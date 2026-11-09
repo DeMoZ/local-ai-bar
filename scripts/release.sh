@@ -25,7 +25,19 @@ git fetch -q origin main
 [[ -f $notes_md ]] || { echo "Missing $notes_md"; exit 1; }
 gh release view "v$version" -R $repo >/dev/null 2>&1 && { echo "Release v$version already exists"; exit 1; }
 
+[[ -n "${NOTARY_PROFILE:-}" && -z "${DEVELOPER_ID:-}" ]] && { echo "NOTARY_PROFILE needs DEVELOPER_ID"; exit 1; }
 ./scripts/build-app.sh
+# Optional notarization (Developer ID builds): NOTARY_PROFILE is a notarytool keychain profile
+# (xcrun notarytool store-credentials). The ticket is stapled to the app before it is zipped.
+if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+  ditto -c -k --keepParent build/LocalAIBar.app build/notarize.zip
+  xcrun notarytool submit build/notarize.zip --keychain-profile "$NOTARY_PROFILE" --wait
+  rm -f build/notarize.zip
+  xcrun stapler staple build/LocalAIBar.app
+  spctl --assess --type execute -v build/LocalAIBar.app
+elif [[ -n "${DEVELOPER_ID:-}" ]]; then
+  echo "Note: signed with Developer ID but not notarized (set NOTARY_PROFILE to notarize)"
+fi
 zip=build/LocalAIBar-$version.zip
 rm -f "$zip"
 ditto -c -k --keepParent build/LocalAIBar.app "$zip"

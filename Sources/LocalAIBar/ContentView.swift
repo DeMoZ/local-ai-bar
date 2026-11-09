@@ -88,7 +88,9 @@ struct StatusView: View {
 
             if s.connected {
                 modelButton
+                if let c = s.lastCrash { crashNote(c) }
                 if s.status == .running || s.status == .loading { details }
+                if let m = s.metrics, m.hasAny { pcLoad(m) }
             }
         }
     }
@@ -144,8 +146,53 @@ struct StatusView: View {
         .controlSize(.small)
     }
 
+    private func crashNote(_ c: CrashInfo) -> some View {
+        let when = ISO8601DateFormatter.withFraction.date(from: c.at) ?? ISO8601DateFormatter().date(from: c.at)
+        let text = [
+            "Последний сбой модели" + (when.map { " " + $0.formatted(.relative(presentation: .named)) } ?? ""),
+            c.exitCode.map { "код \($0)" },
+            c.restarted ? "перезапущена" : nil,
+        ].compactMap { $0 }.joined(separator: ", ")
+        return Label(text, systemImage: "exclamationmark.octagon")
+            .font(.caption).foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func pcLoad(_ m: PcMetrics) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Нагрузка ПК").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
+                if let used = m.ramUsed, let total = m.ramTotal, total > 0 {
+                    meterRow("Память", Double(used) / Double(total), "\(gb(used)) из \(gb(total))")
+                }
+                if let c = m.cpu { meterRow("Процессор", c / 100, String(format: "%.0f%%", c)) }
+                if let g = m.gpu { meterRow("Видеокарта", g / 100, String(format: "%.0f%%", g)) }
+                if m.gpuDedicated != nil || m.gpuShared != nil {
+                    row("Видеопамять", [m.gpuDedicated.map { "своя \(gb($0))" }, m.gpuShared.map { "общая \(gb($0))" }]
+                        .compactMap { $0 }.joined(separator: " · "))
+                }
+                if let r = m.llamaRam { row("llama-server", gb(r)) }
+            }
+        }
+    }
+
+    private func meterRow(_ k: String, _ frac: Double, _ v: String) -> some View {
+        GridRow {
+            Text(k).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                ProgressView(value: min(max(frac, 0), 1)).frame(width: 70)
+                    .tint(frac > 0.9 ? .red : frac > 0.75 ? .orange : .accentColor)
+                Text(v).monospacedDigit()
+            }
+        }
+        .font(.caption)
+    }
+
+    private func gb(_ bytes: Int64) -> String { String(format: "%.1f ГБ", Double(bytes) / 1_073_741_824) }
+
     @ViewBuilder private var stateRows: some View {
         row("Сервер модели", s.llamaHealthy ? "готов" : "не отвечает")
+        if let t = s.liveTPS { row("Сейчас", t >= 0.5 ? String(format: "генерирует %.1f ток/с", t) : "читает запрос") }
         if let sl = s.slots { row("Запросы", sl.busy > 0 ? "в работе \(sl.busy) из \(sl.total)" : "свободно (\(sl.total) слота)") }
         if let since = s.runningSince { row("Работает", since.formatted(.relative(presentation: .numeric))) }
         row("Пинг", "\(s.latencyMs) мс")
@@ -213,17 +260,57 @@ struct SettingsView: View {
             }
             Text("Хранится в Связке ключей macOS").font(.caption2).foregroundStyle(.tertiary)
 
-            if s.connected { contextSection }
+            if s.connected {
+                modelSection
+                contextSection
+            }
 
-            Toggle("Запускать при входе", isOn: Binding(get: { s.launchAtLogin }, set: { s.setLaunchAtLogin($0) }))
-                .font(.caption)
+            VStack(alignment: .leading, spacing: 4) {
+                if s.connected, let a = s.autoRestart {
+                    Toggle("Перезапускать модель, если упала", isOn: Binding(get: { a }, set: { s.setAutoRestart($0) }))
+                        .help("Сервис на ПК сам запустит модель снова (не больше 3 раз за 10 минут)")
+                }
+                Toggle("Уведомлять о сбоях модели", isOn: Binding(get: { s.notifyEnabled }, set: { s.setNotifications($0) }))
+                Toggle("Запускать при входе", isOn: Binding(get: { s.launchAtLogin }, set: { s.setLaunchAtLogin($0) }))
+            }
+            .font(.caption)
 
             Button(s.connected ? "Переподключиться" : "Подключиться") { s.connect() }
                 .buttonStyle(.borderedProminent)
                 .disabled(!s.configured)
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .onAppear { s.loadServiceConfig() }
+        .onAppear { s.loadServiceConfig(); s.loadModels() }
+    }
+
+    private var modelSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Модель").font(.subheadline.weight(.semibold))
+            if !s.models.isEmpty {
+                HStack {
+                    Picker("", selection: Binding(get: { s.modelChoice ?? "" }, set: { s.modelChoice = $0 })) {
+                        ForEach(s.models) { m in
+                            Text(m.name + (m.vision ? " 👁" : "") + (m.sizeBytes > 0 ? "  " + ByteCountFormatter.string(fromByteCount: m.sizeBytes, countStyle: .file) : ""))
+                                .tag(m.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .disabled(s.applyingModel)
+                    Button {
+                        s.applyModel()
+                    } label: {
+                        if s.applyingModel { ProgressView().controlSize(.small) } else { Text("Применить") }
+                    }
+                    .disabled(s.applyingModel || s.modelChoice == nil || s.modelChoice == s.serviceModelId)
+                }
+            }
+            if let m = s.modelMessage {
+                Text(m).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if !s.models.isEmpty {
+                Text("Модели из папки на ПК. 👁 — понимает изображения. Применение перезапустит модель.")
+                    .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private var contextSection: some View {
@@ -331,4 +418,17 @@ private struct PopoverWindowFitter: NSViewRepresentable {
             w.invalidateShadow()
         }
     }
+}
+
+extension PcMetrics {
+    var hasAny: Bool { cpu != nil || gpu != nil || ramTotal != nil || gpuDedicated != nil || gpuShared != nil || llamaRam != nil }
+}
+
+extension ISO8601DateFormatter {
+    /// The service writes times like 2026-11-09T07:01:35.4819910Z (fractional seconds).
+    static let withFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 }
